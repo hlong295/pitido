@@ -1,11 +1,11 @@
 import { getSupabaseBrowserClient } from "./client"
 
-/**
- * IMPORTANT
- * This file is CLIENT-SAFE ONLY.
- * Do NOT import ./server here.
- * All server-side logic must live in app/api/**/route.ts
- */
+/*
+IMPORTANT
+This file is CLIENT-SAFE ONLY.
+Do NOT import ./server here.
+All server-side logic must live in app/api/.../route.ts
+*/
 
 export async function getUserByPiUid(piUid: string) {
   const supabase = getSupabaseBrowserClient()
