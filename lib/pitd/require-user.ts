@@ -67,7 +67,8 @@ async function resolveInternalUserId(candidate: any): Promise<string | null> {
   }
   if (piUser?.id && typeof piUser.id === "string") {
     const master = await resolveMasterUserId(supabase, piUser.id);
-    return master?.masterUserId || piUser.id;
+    // resolveMasterUserId returns { userId }, not { masterUserId }
+    return (master as any)?.userId || piUser.id;
   }
 
   return null;

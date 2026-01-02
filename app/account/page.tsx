@@ -562,7 +562,10 @@ export default function AccountPage() {
         if (piUsername) headers["x-pi-username"] = piUsername
       }
 
-      const res = await fetch("/api/pitd/transactions", {
+      const txUrl = new URL("/api/pitd/transactions", window.location.origin)
+      if (dbgEnabled) txUrl.searchParams.set("dbg", "1")
+
+      const res = await fetch(txUrl.toString(), {
         method: "GET",
         headers,
       })
@@ -572,6 +575,13 @@ export default function AccountPage() {
         const msg = payload?.error || payload?.message || `HTTP ${res.status}`
         setTransactionsError(String(msg))
         setTransactions([])
+        if (dbgEnabled && payload?.dbg) {
+          try {
+            dbgPush(`loadTransactions error | ${String(msg)} | dbg=${JSON.stringify(payload.dbg)}`)
+          } catch {
+            dbgPush(`loadTransactions error | ${String(msg)}`)
+          }
+        }
         return
       }
 

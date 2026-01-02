@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { supabaseAdmin } from "@/lib/supabase/admin";
+import { getSupabaseAdminClient } from "@/lib/supabase/admin";
 
 // Root admins that always pass.
 const ROOT_ADMIN_USERNAMES = new Set(["HLONG295", "HLONG"]); // keep existing behavior
@@ -24,6 +24,7 @@ async function isRequesterAdmin(piUsername?: string | null, requesterId?: string
 
   // Check pi_users.user_role for admin/root.
   // (Do NOT query non-existent columns here.)
+  const supabaseAdmin = getSupabaseAdminClient();
   const { data, error } = await supabaseAdmin
     .from("pi_users")
     .select("id, user_role")
@@ -40,6 +41,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
   try {
+    const supabaseAdmin = getSupabaseAdminClient();
     const requesterId = req.headers.get("x-pi-user-id") || req.headers.get("x-pitodo-user-id") || "";
     const piUsername = req.headers.get("x-pi-username") || "";
     const authType = req.headers.get("x-auth-type") || "";

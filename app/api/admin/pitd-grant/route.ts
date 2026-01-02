@@ -28,7 +28,7 @@ const UUID_RE =
 async function resolveTargetUserMasterId(
   supabaseAdmin: any,
   identifier: string,
-): Promise<{ masterUserId: string; debug: Record<string, any> } | null> {
+): Promise<{ masterUserId: string; candidateUserIds: string[]; debug: Record<string, any> } | null> {
   const trimmed = (identifier || "").trim()
   if (!trimmed) return null
 
@@ -38,6 +38,9 @@ async function resolveTargetUserMasterId(
     const masterUserId = resolved.userId
     return {
       masterUserId,
+      
+      // Backward-compat: wallets may have been created under either the master id or the original id.
+      candidateUserIds: Array.from(new Set([masterUserId, trimmed].filter(Boolean))),
       debug: { kind: "uuid", provided: trimmed, resolved, resolvedUserId: masterUserId },
     }
   }
@@ -54,6 +57,7 @@ async function resolveTargetUserMasterId(
     const masterUserId = resolved.userId
     return {
       masterUserId,
+      candidateUserIds: Array.from(new Set([masterUserId, String(piRow.id)].filter(Boolean))),
       debug: {
         kind: "pi_username",
         provided: trimmed,
@@ -78,6 +82,7 @@ async function resolveTargetUserMasterId(
     const masterUserId = resolved.userId
     return {
       masterUserId,
+      candidateUserIds: Array.from(new Set([masterUserId, String(uRow.id)].filter(Boolean))),
       debug: {
         kind: "email",
         provided: trimmed,
@@ -93,6 +98,7 @@ async function resolveTargetUserMasterId(
   return {
     // not found
     masterUserId: "",
+    candidateUserIds: [],
     debug: {
       kind: "not_found",
       provided: trimmed,
@@ -397,12 +403,18 @@ export async function POST(request: Request) {
     //   resolveMasterUserId already ensures the row exists when needed.
     const targetUserId = masterUserId
 
-    console.log("[v0] Getting wallet for master user:", targetUserId)
+    // Backward-compat: in older baselines, pitd_wallets.user_id may have been created
+    // under a pre-normalized id. For revoke, we MUST read the existing wallet balance.
+    const candidateWalletUserIds = Array.from(
+      new Set((resolved.candidateUserIds || [targetUserId]).filter((v) => typeof v === "string" && UUID_RE.test(v)))
+    )
+
+    console.log("[v0] Getting wallet for target user (candidates):", candidateWalletUserIds)
     // Use limit(1) to avoid maybeSingle() failing if there are accidental duplicates.
     const { data: wallet, error: walletError } = await supabaseAdmin
       .from("pitd_wallets")
       .select("id, balance")
-      .eq("user_id", targetUserId)
+      .in("user_id", candidateWalletUserIds.length ? candidateWalletUserIds : [targetUserId])
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle()

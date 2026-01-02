@@ -15,6 +15,32 @@ function errJson(status: number, message: string, dbg?: any) {
   );
 }
 
+function isUuid(v: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    (v || "").trim()
+  );
+}
+
+// Some Pi Browser / cookie environments may accidentally pass non-UUID identifiers
+// (pi_username / pi_uid / JSON strings). Normalize to a UUID before querying uuid columns.
+async function normalizeToUuid(supabaseAdmin: any, candidate: string) {
+  const raw = (candidate || "").trim();
+  if (!raw) return "";
+  if (isUuid(raw)) return raw;
+
+  // Try resolve by pi_users.pi_username or pi_users.pi_uid.
+  // Keep minimal select to avoid schema break.
+  const { data: piRow, error } = await supabaseAdmin
+    .from("pi_users")
+    .select("id")
+    .or(`pi_username.ilike.${raw},pi_uid.eq.${raw}`)
+    .maybeSingle();
+
+  if (error) return "";
+  const id = (piRow as any)?.id;
+  return typeof id === "string" && id.trim() ? id.trim() : "";
+}
+
 // Resolve current user from either:
 // - Supabase Auth JWT (email/username login)
 // - Pi header user id (Pi Browser login flow)
@@ -124,9 +150,16 @@ export async function GET(req: NextRequest) {
     const dbg: any = { ...(resolved.dbg || {}), step: "GET /api/pitd/transactions" };
     const supabaseAdmin = getSupabaseAdminClient();
 
+    // Ensure the requester id is a UUID before we touch uuid columns.
+    const requesterUuid = await normalizeToUuid(supabaseAdmin, resolved.userId);
+    if (!requesterUuid) {
+      dbg.requesterIdRaw = resolved.userId;
+      return errJson(401, "UNAUTHORIZED", dbgOn ? dbg : undefined);
+    }
+
     // PITD tables are keyed by "master user" id (public.users.id). Normalize here so
     // history works consistently for both Pi-login and email-login users.
-    const master = await resolveMasterUserId(supabaseAdmin, resolved.userId);
+    const master = await resolveMasterUserId(supabaseAdmin, requesterUuid);
     // Default to resolved master user id, but allow client-provided master id for email flow (after auth verified).
     let requesterUserId = master.userId;
     if (authType === "email" && /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(pitodoUserId)) {
@@ -141,8 +174,19 @@ export async function GET(req: NextRequest) {
     // Get requester's wallet (and verify ownership if wallet_id was supplied)
     // Backward-compatibility: older deployments may have rows keyed by the pre-normalized id.
     const candidateUserIds = Array.from(
-      new Set([requesterUserId, resolved.userId].filter((v) => typeof v === "string" && v.length > 0))
+      new Set(
+        [requesterUserId, requesterUuid]
+          .map((v) => (typeof v === "string" ? v.trim() : ""))
+          .filter((v) => v && isUuid(v))
+      )
     );
+
+    if (candidateUserIds.length === 0) {
+      dbg.candidateUserIds = candidateUserIds;
+      dbg.requesterUserId = requesterUserId;
+      dbg.requesterUuid = requesterUuid;
+      return NextResponse.json({ ok: true, wallet: null, transactions: [] });
+    }
 
     // NOTE: trong quá trình migrate/mapping master user, có thể tồn tại nhiều wallet rows
     // (cũ + mới). Lịch sử phải lấy theo TẤT CẢ wallet_id thuộc về user.
@@ -153,6 +197,7 @@ export async function GET(req: NextRequest) {
       .order("created_at", { ascending: true });
     if (walletErr) {
       dbg.walletErr = walletErr.message;
+      dbg.candidateUserIds = candidateUserIds;
       return errJson(500, "WALLET_LOOKUP_FAILED", dbgOn ? dbg : undefined);
     }
     const walletList = Array.isArray(wallets) ? wallets : [];
