@@ -208,7 +208,9 @@ export async function POST(request: Request) {
 
       await syncLoginFlags(existingUser.id)
 
-      // Ensure PITD wallet exists for this user (schema: balance, locked_balance, total_spent, address)
+      // Ensure PITD wallet exists for this user.
+      // IMPORTANT (P0): pitd_wallets.user_id must reference the MASTER user id (public.users.id).
+      // We resolve masterUserId from pi_users.id and only write PITD using that master id.
       // PITD wallet address rule (PITODO): starts with "PITD" + 20 random chars = 24 chars total.
       const makeAddress = () => {
         const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
@@ -226,14 +228,16 @@ export async function POST(request: Request) {
         return `PITD${out}`
       }
 
+      const { userId: masterUserId } = await resolveMasterUserId(adminSupabase, existingUser.id)
+
       const { data: existingWallet } = await adminSupabase
         .from("pitd_wallets")
         .select("id, user_id, balance, locked_balance, total_spent, address")
-        .eq("user_id", existingUser.id)
+        .eq("user_id", masterUserId)
         .maybeSingle()
 
       const walletUpsert = {
-        user_id: existingUser.id,
+        user_id: masterUserId,
         balance: existingWallet?.balance ?? 0,
         locked_balance: (existingWallet as any)?.locked_balance ?? 0,
         total_spent: (existingWallet as any)?.total_spent ?? 0,
@@ -297,15 +301,18 @@ export async function POST(request: Request) {
       return `PITD${out}`
     }
 
+    // Resolve MASTER user id (public.users.id) before touching pitd_wallets.
+    const { userId: masterUserId } = await resolveMasterUserId(adminSupabase, userId)
+
     // If wallet exists but missing address, patch it
     const { data: existingWallet } = await adminSupabase
       .from("pitd_wallets")
       .select("id, user_id, balance, locked_balance, total_spent, address")
-      .eq("user_id", userId)
+      .eq("user_id", masterUserId)
       .maybeSingle()
 
     const walletUpsert = {
-      user_id: userId,
+      user_id: masterUserId,
       balance: existingWallet?.balance ?? 0,
       locked_balance: (existingWallet as any)?.locked_balance ?? 0,
       total_spent: (existingWallet as any)?.total_spent ?? 0,
