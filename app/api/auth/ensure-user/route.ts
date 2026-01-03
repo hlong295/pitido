@@ -3,11 +3,9 @@ import { createClient } from "@supabase/supabase-js"
 import { resolveMasterUserId } from "../../../../lib/pitd/resolve-master-user"
 
 const SUPABASE_URL = "https://wlewqkcbwbvbbwjfpbck.supabase.co"
-const SUPABASE_SERVICE_ROLE_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndsZXdxa2Nid2J2YmJ3amZwYmNrIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NTA2NjA4MiwiZXhwIjoyMDgwNjQyMDgyfQ.CLNeaPyAXRg-Gacc2A93YINxqip60WrlMD2mcop245k"
 
-const SUPABASE_URL_EFF = process.env.NEXT_PUBLIC_SUPABASE_URL || SUPABASE_URL
-const SUPABASE_SERVICE_ROLE_KEY_EFF = process.env.SUPABASE_SERVICE_ROLE_KEY || SUPABASE_SERVICE_ROLE_KEY
+const SUPABASE_URL_EFF = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || SUPABASE_URL
+const SUPABASE_SERVICE_ROLE_KEY_EFF = process.env.SUPABASE_SERVICE_ROLE_KEY
 
 // NOTE:
 // Do not cache role/provider flags here.

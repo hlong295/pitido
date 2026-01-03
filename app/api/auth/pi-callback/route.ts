@@ -1,22 +1,13 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { getSupabaseServerClient } from "@/lib/supabase/server"
-import { createClient } from "@supabase/supabase-js"
+import { getSupabaseAdminClient } from "@/lib/supabase-admin"
 import { resolveMasterUserId } from "@/lib/pitd/resolve-master-user"
 
 const ROOT_ADMIN_USERNAME = "HLong295"
 const PI_API_URL = "https://api.minepi.com"
-// Phase 4 (Pi login): always touch public.users.last_login_at via service role.
-// Best-effort only: never break Pi login if this step fails.
-const SUPABASE_URL_FALLBACK = "https://wlewqkcbwbvbbwjfpbck.supabase.co"
-const SUPABASE_SERVICE_ROLE_KEY_FALLBACK =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIs...wIjoyMDgwNjQyMDgyfQ.CLNeaPyAXRg-Gacc2A93YINxqip60WrlMD2mcop245k"
-
-const SUPABASE_URL_EFF = process.env.NEXT_PUBLIC_SUPABASE_URL || SUPABASE_URL_FALLBACK
-const SUPABASE_SERVICE_ROLE_KEY_EFF = process.env.SUPABASE_SERVICE_ROLE_KEY || SUPABASE_SERVICE_ROLE_KEY_FALLBACK
-
 async function touchUsersLastLogin(piUsersId: string, piUid: string, piUsername: string) {
   try {
-    const admin = createClient(SUPABASE_URL_EFF, SUPABASE_SERVICE_ROLE_KEY_EFF)
+    const admin = getSupabaseAdminClient()
     const { userId: masterUserId } = await resolveMasterUserId(admin, piUsersId)
     const payload: any = {
       last_login_at: new Date().toISOString(),
@@ -96,6 +87,20 @@ async function findExistingPiUser(piUid: string) {
 
 async function upsertPiUser(piUid: string, piUsername: string) {
   const supabase = await getSupabaseServerClient()
+  // Prefer service-role client for writes (production on Vercel) to avoid RLS errors.
+  // Falls back to the regular server client if the service role key is not configured.
+  let admin: ReturnType<typeof getSupabaseAdminClient> | null = null
+  try {
+    admin = getSupabaseAdminClient()
+  } catch (e) {
+    console.warn("[v0] Supabase admin client not configured:", (e as any)?.message || e)
+  }
+  if (!admin && process.env.NODE_ENV === "production") {
+    throw new Error(
+      "Server misconfig: SUPABASE_SERVICE_ROLE_KEY is missing. Add it in Vercel → Project → Settings → Environment Variables (Production)."
+    )
+  }
+  const writeClient = (admin ?? supabase) as any
 
   console.log("[v0] Upserting Pi user:", { piUid, piUsername })
 
@@ -127,7 +132,7 @@ async function upsertPiUser(piUid: string, piUsername: string) {
   if (existingUser) {
     console.log("[v0] Updating existing Pi user:", existingUser.id)
 
-    const { data, error } = await supabase
+    const { data, error } = await writeClient
       .from("pi_users")
       .update({
         pi_username: piUsername,
@@ -170,7 +175,7 @@ async function upsertPiUser(piUid: string, piUsername: string) {
   } else {
     console.log("[v0] Creating new Pi user...")
 
-    const { data, error } = await supabase
+    const { data, error } = await writeClient
       .from("pi_users")
       .insert({
         pi_uid: piUid,
