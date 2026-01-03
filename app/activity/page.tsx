@@ -6,7 +6,7 @@ import { useLanguage } from "@/lib/language-context"
 import { usePiAuth } from "@/lib/pi-auth-context"
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Clock, CheckCircle, XCircle } from "lucide-react"
+import { Clock, CheckCircle, XCircle, History } from "lucide-react"
 
 export default function ActivityPage() {
   const { t } = useLanguage()

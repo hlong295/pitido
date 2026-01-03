@@ -1,22 +1,14 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { getSupabaseServerClient } from "@/lib/supabase/server"
-import { createClient } from "@supabase/supabase-js"
+import { getSupabaseAdminClient } from "@/lib/supabase-admin"
+import { randomUUID } from "crypto"
 import { resolveMasterUserId } from "@/lib/pitd/resolve-master-user"
 
 const ROOT_ADMIN_USERNAME = "HLong295"
 const PI_API_URL = "https://api.minepi.com"
-// Phase 4 (Pi login): always touch public.users.last_login_at via service role.
-// Best-effort only: never break Pi login if this step fails.
-const SUPABASE_URL_FALLBACK = "https://wlewqkcbwbvbbwjfpbck.supabase.co"
-const SUPABASE_SERVICE_ROLE_KEY_FALLBACK =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIs...wIjoyMDgwNjQyMDgyfQ.CLNeaPyAXRg-Gacc2A93YINxqip60WrlMD2mcop245k"
-
-const SUPABASE_URL_EFF = process.env.NEXT_PUBLIC_SUPABASE_URL || SUPABASE_URL_FALLBACK
-const SUPABASE_SERVICE_ROLE_KEY_EFF = process.env.SUPABASE_SERVICE_ROLE_KEY || SUPABASE_SERVICE_ROLE_KEY_FALLBACK
-
 async function touchUsersLastLogin(piUsersId: string, piUid: string, piUsername: string) {
   try {
-    const admin = createClient(SUPABASE_URL_EFF, SUPABASE_SERVICE_ROLE_KEY_EFF)
+    const admin = getSupabaseAdminClient()
     const { userId: masterUserId } = await resolveMasterUserId(admin, piUsersId)
     const payload: any = {
       last_login_at: new Date().toISOString(),
@@ -96,6 +88,20 @@ async function findExistingPiUser(piUid: string) {
 
 async function upsertPiUser(piUid: string, piUsername: string) {
   const supabase = await getSupabaseServerClient()
+  // Prefer service-role client for writes (production on Vercel) to avoid RLS errors.
+  // Falls back to the regular server client if the service role key is not configured.
+  let admin: ReturnType<typeof getSupabaseAdminClient> | null = null
+  try {
+    admin = getSupabaseAdminClient()
+  } catch (e) {
+    console.warn("[v0] Supabase admin client not configured:", (e as any)?.message || e)
+  }
+  if (!admin && process.env.NODE_ENV === "production") {
+    throw new Error(
+      "Server misconfig: SUPABASE_SERVICE_ROLE_KEY is missing. Add it in Vercel → Project → Settings → Environment Variables (Production)."
+    )
+  }
+  const writeClient = (admin ?? supabase) as any
 
   console.log("[v0] Upserting Pi user:", { piUid, piUsername })
 
@@ -124,10 +130,92 @@ async function upsertPiUser(piUid: string, piUsername: string) {
     }
   }
 
-  if (existingUser) {
+	// --- FK SAFETY FOR PITD WALLET ---
+	// We have a FK: pitd_wallets.user_id -> users.id (constraint: pitd_wallets_user_id_fkey).
+	// Some deployments also have a DB trigger that creates a PITD wallet when a Pi user is created.
+	// If the matching row in `users` does not exist (same UUID), the trigger (or any wallet insert)
+	// will fail with the FK violation you're seeing on Pi Browser.
+	//
+	// Therefore, before we insert/update `pi_users`, we guarantee a corresponding `users` row exists
+	// with the SAME id. We do NOT change any UI; we only harden server-side data consistency.
+		const usersClient = getSupabaseAdminClient()
+		let targetUserId = existingUser?.id
+		if (!targetUserId) {
+			// Reuse existing `users` row for this Pi account if present, otherwise create a new uuid.
+			const { data: byUid, error: byUidErr } = await usersClient
+				.from("users")
+				.select("id")
+				.eq("pi_uid", piUid)
+				.maybeSingle()
+			if (byUidErr) {
+				console.warn("[v0] users lookup by pi_uid error (non-fatal):", byUidErr)
+			}
+			targetUserId = byUid?.id || randomUUID()
+		}
+
+	// If a users row already exists we only touch Pi linkage + last_login_at (avoid overwriting email users).
+	const { data: usersRow, error: usersReadErr } = await usersClient
+		.from("users")
+		.select("id,user_role,user_type")
+		.eq("id", targetUserId)
+		.maybeSingle()
+	if (usersReadErr) {
+		console.warn("[v0] users lookup error (non-fatal):", usersReadErr)
+	}
+
+	if (!usersRow) {
+		const usersInsertPayload: any = {
+			id: targetUserId,
+			pi_uid: piUid,
+			pi_username: piUsername,
+			user_type: "pi",
+			user_role: isRootAdmin ? "root" : "redeemer",
+			verification_status: "pending",
+			last_login_at: new Date().toISOString(),
+		}
+		const { error: usersInsertErr } = await usersClient.from("users").insert(usersInsertPayload)
+		if (usersInsertErr) {
+			console.error("[v0] Failed to ensure users row for Pi login:", {
+				targetUserId,
+				piUid,
+				piUsername,
+				error: usersInsertErr,
+			})
+			throw usersInsertErr
+		}
+	} else {
+		const { error: usersUpdateErr } = await usersClient
+			.from("users")
+			.update({
+				pi_uid: piUid,
+				pi_username: piUsername,
+				last_login_at: new Date().toISOString(),
+			})
+			.eq("id", targetUserId)
+		if (usersUpdateErr) {
+			console.warn("[v0] users update error (non-fatal):", usersUpdateErr)
+		}
+	}
+
+	// Final sanity check (Pi Browser has no console): verify master users row exists.
+	const { data: usersRowVerify, error: usersVerifyErr } = await usersClient
+		.from("users")
+		.select("id,user_type")
+		.eq("id", targetUserId)
+		.maybeSingle();
+	if (usersVerifyErr) {
+		console.warn("[pi-callback] users verify error (non-fatal):", usersVerifyErr);
+	}
+	if (!usersRowVerify) {
+		throw new Error(
+			`[pi-callback] Missing master users row for targetUserId=${targetUserId} piUid=${piUid} piUsername=${piUsername}`
+		);
+	}
+
+	if (existingUser) {
     console.log("[v0] Updating existing Pi user:", existingUser.id)
 
-    const { data, error } = await supabase
+    const { data, error } = await writeClient
       .from("pi_users")
       .update({
         pi_username: piUsername,
@@ -170,9 +258,10 @@ async function upsertPiUser(piUid: string, piUsername: string) {
   } else {
     console.log("[v0] Creating new Pi user...")
 
-    const { data, error } = await supabase
+    const { data, error } = await writeClient
       .from("pi_users")
       .insert({
+				id: targetUserId,
         pi_uid: piUid,
         pi_username: piUsername,
         full_name: piUsername,

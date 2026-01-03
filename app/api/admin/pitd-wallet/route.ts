@@ -14,13 +14,20 @@ export async function GET(req: NextRequest) {
   const userId = searchParams.get("userId");
   if (!userId) return errJson(400, "Missing userId");
 
-  const master = await resolveMasterUserId(userId);
-  if (!master.ok) return errJson(master.status, master.error, master.debug);
+  // A1: public.users is master. Resolve candidate into a master users.id
+  let masterUserId = userId;
+  try {
+    const resolved = await resolveMasterUserId(adminSupabase as any, userId);
+    masterUserId = (resolved as any).userId || userId;
+  } catch (e: any) {
+    // Best-effort: don't hard-fail wallet read
+    masterUserId = userId;
+  }
 
   const { data: wallet, error } = await adminSupabase
     .from("pitd_wallets")
     .select("id, user_id, balance, locked_balance, total_spent, address, created_at, updated_at")
-    .eq("user_id", master.masterUserId)
+    .eq("user_id", masterUserId)
     .maybeSingle();
 
   if (error) return errJson(500, "DB error", { error: error.message });

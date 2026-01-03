@@ -3,11 +3,9 @@ import { createClient } from "@supabase/supabase-js"
 import { resolveMasterUserId } from "../../../../lib/pitd/resolve-master-user"
 
 const SUPABASE_URL = "https://wlewqkcbwbvbbwjfpbck.supabase.co"
-const SUPABASE_SERVICE_ROLE_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndsZXdxa2Nid2J2YmJ3amZwYmNrIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NTA2NjA4MiwiZXhwIjoyMDgwNjQyMDgyfQ.CLNeaPyAXRg-Gacc2A93YINxqip60WrlMD2mcop245k"
 
-const SUPABASE_URL_EFF = process.env.NEXT_PUBLIC_SUPABASE_URL || SUPABASE_URL
-const SUPABASE_SERVICE_ROLE_KEY_EFF = process.env.SUPABASE_SERVICE_ROLE_KEY || SUPABASE_SERVICE_ROLE_KEY
+const SUPABASE_URL_EFF = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || SUPABASE_URL
+const SUPABASE_SERVICE_ROLE_KEY_EFF = process.env.SUPABASE_SERVICE_ROLE_KEY
 
 // NOTE:
 // Do not cache role/provider flags here.
@@ -34,9 +32,11 @@ export async function POST(request: Request) {
     const isUuid = (s: string) =>
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(s || ""))
 
-    const fromPi = Boolean(metadata?.from_pi) || (!!metadata?.username && !email)
+    const fromPi = Boolean(body?.fromPi) || Boolean(metadata?.fromPi) || Boolean(metadata?.from_pi) || (!!metadata?.username && !email);
+    const piUsername = (body?.piUsername || body?.pi_username || metadata?.pi_username || metadata?.piUsername || metadata?.username) ? String(body?.piUsername || body?.pi_username || metadata?.pi_username || metadata?.piUsername || metadata?.username) : undefined;
     const piUid: string | undefined =
-      (metadata?.pi_uid ? String(metadata.pi_uid) : undefined) || (fromPi && !isUuid(String(userId)) ? String(userId) : undefined)
+      (metadata?.pi_uid ? String(metadata.pi_uid) : undefined) ||
+      (fromPi && userId && !isUuid(String(userId)) ? String(userId) : undefined);
 
     if (debugEnabled) debug.push({ step: "request", userId, email: email || null, hasMetadata: Boolean(metadata) })
 
@@ -110,7 +110,7 @@ export async function POST(request: Request) {
     // - If userId is uuid -> use it
     // - If this is a Pi call and we only have piUid -> resolve pi_users.id by pi_uid
     let candidateUserIdForSync: string = String(userId)
-    if (!isUuid(candidateUserIdForSync) && fromPi && piUid) {
+    if (fromPi && piUid) {
       try {
         const { data: piRow } = await adminSupabase.from("pi_users").select("id").eq("pi_uid", piUid).maybeSingle()
         if ((piRow as any)?.id) {
@@ -210,7 +210,9 @@ export async function POST(request: Request) {
 
       await syncLoginFlags(existingUser.id)
 
-      // Ensure PITD wallet exists for this user (schema: balance, locked_balance, total_spent, address)
+      // Ensure PITD wallet exists for this user.
+      // IMPORTANT (P0): pitd_wallets.user_id must reference the MASTER user id (public.users.id).
+      // We resolve masterUserId from pi_users.id and only write PITD using that master id.
       // PITD wallet address rule (PITODO): starts with "PITD" + 20 random chars = 24 chars total.
       const makeAddress = () => {
         const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
@@ -228,21 +230,31 @@ export async function POST(request: Request) {
         return `PITD${out}`
       }
 
+      const { userId: masterUserId } = await resolveMasterUserId(adminSupabase, existingUser.id)
+
       const { data: existingWallet } = await adminSupabase
         .from("pitd_wallets")
         .select("id, user_id, balance, locked_balance, total_spent, address")
-        .eq("user_id", existingUser.id)
+        .eq("user_id", masterUserId)
         .maybeSingle()
 
       const walletUpsert = {
-        user_id: existingUser.id,
+        user_id: masterUserId,
         balance: existingWallet?.balance ?? 0,
         locked_balance: (existingWallet as any)?.locked_balance ?? 0,
         total_spent: (existingWallet as any)?.total_spent ?? 0,
         address: existingWallet?.address || makeAddress(),
       }
 
-      await adminSupabase.from("pitd_wallets").upsert(walletUpsert, { onConflict: "user_id" })
+      const { error: pitdWalletUpsertErr } = await adminSupabase
+        .from("pitd_wallets")
+        .upsert(walletUpsert, { onConflict: "user_id" });
+
+      if (pitdWalletUpsertErr) {
+        throw new Error(
+          `PITD wallet upsert failed: ${pitdWalletUpsertErr.message} | debug=${JSON.stringify({ masterUserId, candidateUserIdForSync, piUid, piUsername })}`
+        );
+      }
 
 
       const result = {
@@ -299,22 +311,33 @@ export async function POST(request: Request) {
       return `PITD${out}`
     }
 
+    // Resolve MASTER user id (public.users.id) before touching pitd_wallets.
+    const { userId: masterUserId } = await resolveMasterUserId(adminSupabase, userId)
+
     // If wallet exists but missing address, patch it
     const { data: existingWallet } = await adminSupabase
       .from("pitd_wallets")
       .select("id, user_id, balance, locked_balance, total_spent, address")
-      .eq("user_id", userId)
+      .eq("user_id", masterUserId)
       .maybeSingle()
 
     const walletUpsert = {
-      user_id: userId,
+      user_id: masterUserId,
       balance: existingWallet?.balance ?? 0,
       locked_balance: (existingWallet as any)?.locked_balance ?? 0,
       total_spent: (existingWallet as any)?.total_spent ?? 0,
       address: existingWallet?.address || makeAddress(),
     }
 
-    await adminSupabase.from("pitd_wallets").upsert(walletUpsert, { onConflict: "user_id" })
+    const { error: pitdWalletUpsertErr } = await adminSupabase
+      .from("pitd_wallets")
+      .upsert(walletUpsert, { onConflict: "user_id" });
+
+    if (pitdWalletUpsertErr) {
+      throw new Error(
+        `PITD wallet upsert failed: ${pitdWalletUpsertErr.message} | debug=${JSON.stringify({ masterUserId, candidateUserIdForSync, piUid, piUsername })}`
+      );
+    }
 
     await syncLoginFlags(newUser.id)
 

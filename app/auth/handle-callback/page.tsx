@@ -54,38 +54,22 @@ export default function HandleCallbackPage() {
 
             console.log("[v0] HandleCallback: Session set for:", data.user?.email)
 
-            // Create pi_users record if needed
+            // IMPORTANT (PITODO): PITD is an internal asset.
+            // Do NOT create/modify PITD (wallet/transactions) directly from the client.
+            // Always go through server API.
             if (data.user) {
-              const metadata = data.user.user_metadata || {}
-              const { data: existingUser } = await supabase
-                .from("pi_users")
-                .select("id")
-                .eq("id", data.user.id)
-                .maybeSingle()
-
-              if (!existingUser) {
-                await supabase.from("pi_users").upsert(
-                  {
-                    id: data.user.id,
-                    pi_uid: `EMAIL-${data.user.id}`,
-                    pi_username:
-                      metadata.username || data.user.email?.split("@")[0] || `user_${data.user.id.substring(0, 8)}`,
+              try {
+                await fetch("/api/auth/ensure-user", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    userId: data.user.id,
                     email: data.user.email,
-                    full_name: metadata.full_name || "",
-                    phone_number: metadata.phone_number || "",
-                    address: metadata.address || "",
-                    user_role: "redeemer",
-                    user_type: "email",
-                    verification_status: "verified",
-                  },
-                  { onConflict: "id" },
-                )
-
-                await supabase
-                  .from("pitd_wallets")
-                  .upsert({ user_id: data.user.id, balance: 0 }, { onConflict: "user_id" })
-              } else {
-                await supabase.from("pi_users").update({ verification_status: "verified" }).eq("id", data.user.id)
+                    metadata: { ...(data.user.user_metadata || {}), email_confirmed_at: data.user.email_confirmed_at },
+                  }),
+                })
+              } catch (e) {
+                console.warn("[v0] HandleCallback: ensure-user failed (ignored)", e)
               }
             }
 
@@ -117,6 +101,23 @@ export default function HandleCallbackPage() {
             console.error("[v0] HandleCallback: Exchange error:", exchangeError)
             window.location.href = `/auth/verify-result?status=error&message=exchange_error`
             return
+          }
+
+          // Best-effort: ensure pi_users/users master + PITD wallet is created server-side
+          if (data.user) {
+            try {
+              await fetch("/api/auth/ensure-user", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  userId: data.user.id,
+                  email: data.user.email,
+                  metadata: { ...(data.user.user_metadata || {}), email_confirmed_at: data.user.email_confirmed_at },
+                }),
+              })
+            } catch (e) {
+              console.warn("[v0] HandleCallback: ensure-user failed (ignored)", e)
+            }
           }
 
           console.log("[v0] HandleCallback: Code exchanged for:", data.user?.email)

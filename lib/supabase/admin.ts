@@ -49,3 +49,6 @@ export function getSupabaseAdminClient() {
     auth: { persistSession: false, autoRefreshToken: false },
   })
 }
+
+// Compatibility export for older imports
+export const getAdminSupabase = getSupabaseAdminClient

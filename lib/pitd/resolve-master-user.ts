@@ -80,6 +80,24 @@ export async function resolveMasterUserId(
     .maybeSingle<PiUsersRow>();
 
   if (p0?.id) {
+    // If a users row already exists for this Pi identity (but with a different UUID),
+    // treat that users.id as the master. This prevents FK failures when pitd_wallets
+    // references public.users(id).
+    if (p0.pi_uid || p0.pi_username) {
+      let q = admin.from("users").select("id").limit(1);
+      if (p0.pi_uid) q = q.eq("pi_uid", p0.pi_uid);
+      else q = q.ilike("pi_username", p0.pi_username as string);
+
+      const { data: existingByPi, error: existingByPiErr } = await q.maybeSingle<{ id: string }>();
+      if (!existingByPiErr && existingByPi?.id) {
+        // If it's already mirrored with the same id, fall through to the normal path.
+        // If it's a different id (legacy rows), use the users.id as master.
+        if (existingByPi.id !== p0.id) {
+          return { userId: existingByPi.id, source: "users" };
+        }
+      }
+    }
+
     // Ensure users row exists with same id.
     const insertPayload: Partial<UsersRow> = {
       id: p0.id,
@@ -103,16 +121,27 @@ export async function resolveMasterUserId(
     // Insert if missing. If already exists (race), ignore.
     const { error: insErr } = await admin.from("users").insert(insertPayload);
     if (insErr) {
-      // If conflict (duplicate key), it's fine — another request inserted it.
-      // If RLS blocks insert (common when we only have anon key), we still return the pi_users id
-      // and let downstream logic attempt to read PITD wallet using that id.
+      // If conflict (duplicate key / unique constraint), try to resolve to the existing users row.
       const code = (insErr as any).code as string | undefined;
-      if (code !== "23505") {
-        // Do not throw — wallet read should still work even without a mirrored users row.
-        // We keep this behavior intentionally to avoid breaking login/UI in constrained runtimes.
-        // eslint-disable-next-line no-console
-        console.warn("[resolveMasterUserId] ensure users row skipped:", insErr.message);
+
+      if (code === "23505") {
+        // Most commonly: pi_uid is already present in public.users with a different UUID.
+        if (p0.pi_uid || p0.pi_username) {
+          let q = admin.from("users").select("id").limit(1);
+          if (p0.pi_uid) q = q.eq("pi_uid", p0.pi_uid);
+          else q = q.ilike("pi_username", p0.pi_username as string);
+          const { data: existing, error: existingErr } = await q.maybeSingle<{ id: string }>();
+          if (!existingErr && existing?.id) {
+            return { userId: existing.id, source: "users" };
+          }
+        }
+        // Fall back (should be rare): return pi_users id.
+        return { userId: p0.id, source: "pi_users" };
       }
+
+      // For non-conflict errors (permission / not-null constraint / etc.) we should fail fast.
+      // Otherwise the next step (creating pitd_wallets) will hit an FK violation.
+      throw new Error(`[resolveMasterUserId] cannot ensure public.users row: ${insErr.message}`);
     }
 
     return { userId: p0.id, source: "pi_users" };
