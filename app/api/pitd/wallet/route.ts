@@ -132,6 +132,29 @@ export async function GET(req: NextRequest) {
     }
 
     if (existing?.id) {
+      // Backfill address for legacy rows that were created before we started
+      // generating/storing PITD addresses (address may be NULL/empty).
+      if (!existing.address || String(existing.address).trim() === "") {
+        const newAddr = `PITD_${crypto.randomUUID().replace(/-/g, "")}`
+        const { data: patched, error: patchErr } = await admin
+          .from("pitd_wallets")
+          .update({ address: newAddr })
+          .eq("id", existing.id)
+          .select("id,user_id,balance,locked_balance,total_spent,address")
+          .maybeSingle()
+
+        if (!patchErr && patched?.id) {
+          return NextResponse.json(
+            {
+              ok: true,
+              wallet: patched,
+              ...(dbg ? { dbg: { ...dbgBase, backfilled_address: true } } : {}),
+            },
+            { status: 200 },
+          )
+        }
+      }
+
       return NextResponse.json(
         {
           ok: true,
