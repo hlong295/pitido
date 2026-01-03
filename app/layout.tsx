@@ -6,6 +6,7 @@ import Script from "next/script"
 import "./globals.css"
 import { LanguageProvider } from "@/lib/language-context"
 import { AuthProvider } from "@/lib/auth-context"
+import { PiAuthProvider } from "@/lib/pi-auth-context"
 import PiDebugOverlay from "@/components/pi-debug-overlay"
 
 const geistSans = Geist({
@@ -45,8 +46,10 @@ export default function RootLayout({
         <Script src="https://sdk.minepi.com/pi-sdk.js" strategy="afterInteractive" />
         <LanguageProvider>
           <AuthProvider>
-            {children}
-            <PiDebugOverlay />
+            <PiAuthProvider>
+              {children}
+              <PiDebugOverlay />
+            </PiAuthProvider>
           </AuthProvider>
         </LanguageProvider>
       </body>
