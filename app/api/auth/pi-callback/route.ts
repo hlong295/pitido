@@ -1,6 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { getSupabaseServerClient } from "@/lib/supabase/server"
 import { getSupabaseAdminClient } from "@/lib/supabase-admin"
+import { randomUUID } from "crypto"
 import { resolveMasterUserId } from "@/lib/pitd/resolve-master-user"
 
 const ROOT_ADMIN_USERNAME = "HLong295"
@@ -129,7 +130,74 @@ async function upsertPiUser(piUid: string, piUsername: string) {
     }
   }
 
-  if (existingUser) {
+	// --- FK SAFETY FOR PITD WALLET ---
+	// We have a FK: pitd_wallets.user_id -> users.id (constraint: pitd_wallets_user_id_fkey).
+	// Some deployments also have a DB trigger that creates a PITD wallet when a Pi user is created.
+	// If the matching row in `users` does not exist (same UUID), the trigger (or any wallet insert)
+	// will fail with the FK violation you're seeing on Pi Browser.
+	//
+	// Therefore, before we insert/update `pi_users`, we guarantee a corresponding `users` row exists
+	// with the SAME id. We do NOT change any UI; we only harden server-side data consistency.
+		const usersClient = getSupabaseAdminClient()
+		let targetUserId = existingUser?.id
+		if (!targetUserId) {
+			// Reuse existing `users` row for this Pi account if present, otherwise create a new uuid.
+			const { data: byUid, error: byUidErr } = await usersClient
+				.from("users")
+				.select("id")
+				.eq("pi_uid", piUid)
+				.maybeSingle()
+			if (byUidErr) {
+				console.warn("[v0] users lookup by pi_uid error (non-fatal):", byUidErr)
+			}
+			targetUserId = byUid?.id || randomUUID()
+		}
+
+	// If a users row already exists we only touch Pi linkage + last_login_at (avoid overwriting email users).
+	const { data: usersRow, error: usersReadErr } = await usersClient
+		.from("users")
+		.select("id,user_role,user_type")
+		.eq("id", targetUserId)
+		.maybeSingle()
+	if (usersReadErr) {
+		console.warn("[v0] users lookup error (non-fatal):", usersReadErr)
+	}
+
+	if (!usersRow) {
+		const usersInsertPayload: any = {
+			id: targetUserId,
+			pi_uid: piUid,
+			pi_username: piUsername,
+			user_type: "pi",
+			user_role: isRootAdmin ? "root" : "redeemer",
+			verification_status: "pending",
+			last_login_at: new Date().toISOString(),
+		}
+		const { error: usersInsertErr } = await usersClient.from("users").insert(usersInsertPayload)
+		if (usersInsertErr) {
+			console.error("[v0] Failed to ensure users row for Pi login:", {
+				targetUserId,
+				piUid,
+				piUsername,
+				error: usersInsertErr,
+			})
+			throw usersInsertErr
+		}
+	} else {
+		const { error: usersUpdateErr } = await usersClient
+			.from("users")
+			.update({
+				pi_uid: piUid,
+				pi_username: piUsername,
+				last_login_at: new Date().toISOString(),
+			})
+			.eq("id", targetUserId)
+		if (usersUpdateErr) {
+			console.warn("[v0] users update error (non-fatal):", usersUpdateErr)
+		}
+	}
+
+	if (existingUser) {
     console.log("[v0] Updating existing Pi user:", existingUser.id)
 
     const { data, error } = await writeClient
@@ -178,6 +246,7 @@ async function upsertPiUser(piUid: string, piUsername: string) {
     const { data, error } = await writeClient
       .from("pi_users")
       .insert({
+				id: targetUserId,
         pi_uid: piUid,
         pi_username: piUsername,
         full_name: piUsername,
